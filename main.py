@@ -13,6 +13,7 @@ from pathlib import Path
 from diffusers import CogVideoXPipeline
 from diffusers.utils import export_to_video
 import asyncio
+from dotenv import load_dotenv
 
 from utils.prompt import enhance_prompt, get_negative_prompt
 
@@ -25,7 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("posts_generation")
 
+# Chargement des variables d'environnement
+load_dotenv()
+
 app=fastapi.FastAPI()
+
 
 # Constants
 # 1️⃣ Base directory du projet
