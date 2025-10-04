@@ -1,0 +1,10 @@
+fastapi[standard]
+huggingface_hub
+pydantic
+transformers
+diffusers
+sentencepiece
+torch
+sqlalchemy
+pytz
+accelerate
