@@ -14,7 +14,7 @@ from diffusers import CogVideoXPipeline
 from diffusers.utils import export_to_video
 import asyncio
 from dotenv import load_dotenv
-
+from transformers import BitsAndBytesConfig
 from utils.prompt import enhance_prompt, get_negative_prompt
 
 # ---------------------------------------------------------------------------
@@ -80,6 +80,22 @@ class VideoGenerationResponse(BaseModel):
     generation_time: float
 
 
+import asyncio
+import torch
+import logging
+from pathlib import Path
+from fastapi import HTTPException
+from transformers import BitsAndBytesConfig
+from huggingface_hub import snapshot_download, login
+from diffusers import CogVideoXPipeline
+
+logger = logging.getLogger(__name__)
+
+HF_MODEL_ID = os.getenv("HF_MODEL_ID", "THUDM/CogVideoX-2b")
+HF_LOCAL_REPO = Path(os.getenv("HF_LOCAL_REPO", "models/CogVideoX-2b")).resolve()
+ALLOW_AUTO_DOWNLOAD = os.getenv("ALLOW_AUTO_DOWNLOAD", "1") == "1"
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+
 class CogVideoXManager:
     _instance = None
 
@@ -93,25 +109,25 @@ class CogVideoXManager:
         return cls._instance
 
     async def ensure_initialized(self):
+        """Assure que le pipeline est prêt sans bloquer en cas d’erreur."""
         if self._is_initialized:
             return
         async with self._lock:
-            if self._is_initialized:
-                return
-            await self._initialize()
+            if not self._is_initialized:
+                await self._initialize()
 
     async def _initialize(self):
-        logger.info("🚀 Initialisation CogVideoX-2b (offline-first)")
-        if not HF_LOCAL_REPO.exists():
+        logger.info("🚀 Initialisation de CogVideoX-2b (offline-first)")
+
+        # Vérifie si le modèle est disponible localement
+        if not HF_LOCAL_REPO.exists() or not any(HF_LOCAL_REPO.iterdir()):
             if not ALLOW_AUTO_DOWNLOAD:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        f"Modèle absent: {HF_LOCAL_REPO}. "
-                        "Pré-téléchargez le modèle ou définissez ALLOW_AUTO_DOWNLOAD=1."
-                    ),
+                logger.warning(
+                    f"⚠️ Modèle absent: {HF_LOCAL_REPO}. Téléchargement automatique désactivé."
                 )
+                return  # Pas de blocage
             try:
+                logger.info(f"📥 Téléchargement du modèle {HF_MODEL_ID} depuis Hugging Face...")
                 if HUGGINGFACE_TOKEN:
                     login(token=HUGGINGFACE_TOKEN)
                 snapshot_download(
@@ -121,18 +137,30 @@ class CogVideoXManager:
                     local_dir_use_symlinks=False,
                     revision="main",
                 )
-                logger.info(f"📥 Modèle téléchargé dans {HF_LOCAL_REPO}")
+                logger.info(f"✅ Modèle téléchargé dans {HF_LOCAL_REPO}")
             except Exception as e:
                 logger.error(f"❌ Échec du téléchargement du modèle: {e}")
-                raise HTTPException(status_code=503, detail=f"Téléchargement modèle impossible: {e}")
-        try:
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            self._pipeline = CogVideoXPipeline.from_pretrained(
-                str(HF_LOCAL_REPO), torch_dtype=dtype, local_files_only=True
-            )
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            self._pipeline = self._pipeline.to(device)
+                return  # Ne bloque pas le serveur
 
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            # ✅ Configuration quantization int8
+            quant_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_threshold=6.0,
+                llm_int8_has_fp16_weight=False,
+            )
+
+            logger.info("🧠 Chargement du modèle (int8, device_map=auto)")
+            self._pipeline = CogVideoXPipeline.from_pretrained(
+                str(HF_LOCAL_REPO),
+                device_map="auto",
+                quantization_config=quant_config,
+                local_files_only=True  # Ne télécharge rien ici
+            )
+
+            # ⚙️ Optimisations GPU
             if device == "cuda":
                 try:
                     self._pipeline.enable_model_cpu_offload()
@@ -147,22 +175,27 @@ class CogVideoXManager:
                 except Exception:
                     pass
             else:
-                logger.warning("⚠️ GPU non disponible – fonctionnement CPU (lent)")
+                logger.warning("⚠️ GPU non disponible — fonctionnement CPU (lent)")
 
             self._is_initialized = True
-            logger.info("✅ CogVideoX-2b prêt.")
-        except Exception as e:
-            logger.error(f"❌ Erreur initialisation CogVideoX: {e}")
-            self._is_initialized = False
-            raise HTTPException(status_code=500, detail=f"Init CogVideoX échouée: {e}")
+            logger.info("✅ CogVideoX-2b prêt (int8).")
 
-    def get_pipeline(self) -> CogVideoXPipeline:
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de l’initialisation CogVideoX: {e}")
+            self._is_initialized = False
+            self._pipeline = None
+            # ⚠️ On ne lève pas d’exception HTTP ici — pour éviter de bloquer le serveur
+
+    def get_pipeline(self):
+        """Retourne le pipeline si disponible, sinon None (au lieu d’erreur)."""
         if not self._is_initialized or self._pipeline is None:
-            raise RuntimeError(f"CogVideoX non initialisé {self._is_initialized} {self._pipeline}")
+            logger.warning("⚠️ CogVideoX non initialisé ou pipeline absent.")
+            return None
         return self._pipeline
 
     @staticmethod
     def cleanup_memory():
+        """Nettoie la mémoire GPU et CPU."""
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
