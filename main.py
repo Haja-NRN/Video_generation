@@ -1,6 +1,7 @@
 import os
 import logging
 import fastapi
+from groq import Groq
 from huggingface_hub import login, snapshot_download
 from config.settings import now_configured, settings
 from fastapi import Form, HTTPException
@@ -16,6 +17,7 @@ import asyncio
 from dotenv import load_dotenv
 from transformers import BitsAndBytesConfig
 from utils.prompt import enhance_prompt, get_negative_prompt
+from app.api.routes import post_generation
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,6 +51,10 @@ HF_MODEL_ID = os.getenv("HF_MODEL_ID", "THUDM/CogVideoX-2b")
 HF_LOCAL_REPO = MODEL_DIR / "CogVideoX-2b"
 ALLOW_AUTO_DOWNLOAD = True  # tu autorises le téléchargement automatique
 HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN", None)
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", None)
+BYTEZ_API_KEY = os.getenv("BYTEZ_API_KEY", None)
+PLACID_API_KEY= os.getenv("PLACID_API_KEY", None)
+BYTEZ_MODEL_ID = "Lightricks/LTX-Video-0.9.7-dev"
 DEFAULT_DEVICE="cuda" if torch.cuda.is_available() else "cpu"
 VIDEO_CONFIGS = {
         "tiktok": {
@@ -72,6 +78,7 @@ VIDEO_CONFIGS = {
     }
 
 
+
 class VideoGenerationResponse(BaseModel):
     status: Literal["success", "error"]
     platform: Literal["tiktok", "youtube"]
@@ -79,22 +86,6 @@ class VideoGenerationResponse(BaseModel):
     message: str
     generation_time: float
 
-
-import asyncio
-import torch
-import logging
-from pathlib import Path
-from fastapi import HTTPException
-from transformers import BitsAndBytesConfig
-from huggingface_hub import snapshot_download, login
-from diffusers import CogVideoXPipeline
-
-logger = logging.getLogger(__name__)
-
-HF_MODEL_ID = os.getenv("HF_MODEL_ID", "THUDM/CogVideoX-2b")
-HF_LOCAL_REPO = Path(os.getenv("HF_LOCAL_REPO", "models/CogVideoX-2b")).resolve()
-ALLOW_AUTO_DOWNLOAD = os.getenv("ALLOW_AUTO_DOWNLOAD", "1") == "1"
-HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 
 class CogVideoXManager:
     _instance = None
@@ -205,7 +196,6 @@ class CogVideoXManager:
 
 video_manager = CogVideoXManager()
 
-
 async def generate_video_with_cogvideox(prompt: str, platform: str, quality: str = "medium", use_negative_prompt: bool = True) -> Dict:
     await video_manager.ensure_initialized()
     
@@ -275,9 +265,7 @@ async def generate_video_with_cogvideox(prompt: str, platform: str, quality: str
         video_manager.cleanup_memory()
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de la vidéo: {str(e)}")
 
-
-
-@app.post("/generate-video", response_model=VideoGenerationResponse)
+# @app.post("/generate-video", response_model=VideoGenerationResponse)
 async def generate_video_only(
     platform: Literal["tiktok", "youtube"] = Form(...),
     theme_general: str = Form(...),
@@ -326,3 +314,6 @@ async def generate_video_only(
         logger.error(f"❌ Erreur génération vidéo: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de vidéo: {e}")
 
+app.include_router(
+    post_generation.router
+)

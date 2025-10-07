@@ -1,4 +1,6 @@
 fastapi[standard]
+celery[redis]
+redis
 huggingface_hub
 pydantic
 transformers
@@ -9,3 +11,9 @@ sqlalchemy
 pytz
 accelerate
 bitsandbytes
+bytez
+aiohttp
+aiofiles
+openai
+groq 
+moviepy[optional]
