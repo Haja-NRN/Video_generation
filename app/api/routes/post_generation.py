@@ -311,7 +311,7 @@ async def generate_video_only(
     
 @router.post("/generate-video-bytez-async", response_model=Dict)
 async def generate_video_async(
-    platform: str = Form(...),
+    platform: Literal["tiktok", "youtube"] = Form(...),
     theme_general: str = Form(...),
     theme_hebdo: str = Form(""),
     texte_inspiration: str = Form(""),
