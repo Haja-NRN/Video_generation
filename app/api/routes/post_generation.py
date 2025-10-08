@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 import fastapi
 from groq import Groq
 from config.settings import now_configured, settings
@@ -20,7 +21,10 @@ import requests
 import json
 from app.celery_app.celery_config import celery_app
 from moviepy import VideoFileClip, concatenate_videoclips
-
+from PIL import Image
+from abc import ABC, abstractmethod
+from runware import Runware, IImageInference,IVideoInference
+import base64
 
 
 # ---------------------------------------------------------------------------
@@ -39,12 +43,17 @@ router = APIRouter(tags=["Video generation"])
 
 
 # Constants
+BASE_URL = "http://127.0.0.1:8000/"
 # 1️⃣ Base directory du projet
 BASE_DIR = settings.BASE_DIR  # ou ajuste selon ton fichier
 
 # 2️⃣ Dossier où seront sauvegardées les vidéos
 VIDEO_STATIC_DIR = BASE_DIR / "static" / "videos"
 VIDEO_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+
+# 2️⃣ Dossier où seront sauvegardées les vidéos
+IMAGE_STATIC_DIR = BASE_DIR / "static" / "images"
+IMAGE_STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # 3️⃣ Dossier local pour les modèles Hugging Face
 MODEL_DIR = BASE_DIR / "models"  # ton dossier préféré
@@ -81,6 +90,391 @@ VIDEO_CONFIGS = {
         }
     }
 
+
+
+
+
+# === Base Class ===
+class BaseVideoModel(ABC):
+    """Classe abstraite pour tous les modèles de génération vidéo."""
+    
+    def __init__(self, model_name):
+        self.model_name = model_name
+    
+    @abstractmethod
+    async def generate(self, prompt: str, context_image: bytes = None) -> str:
+        """Retourne l'URL de la vidéo générée."""
+        pass
+
+
+# === Bytez Model ===
+class BytezModel(BaseVideoModel):
+    """
+    Implémentation du modèle Bytez.
+    """
+    def __init__(self, sdk, model_id):
+        super().__init__("bytez")
+        self.model = sdk.model(model_id)
+    
+    async def generate(self, prompt: str, context_image: bytes = None) -> str:
+        error = None
+        try:
+            if BYTEZ_API_KEY is None:
+                logger.error("BYTEZ_API_KEY non configuré (si le repo est gated, la génération échouera)")
+                raise Exception("BYTEZ_API_KEY non configuré")
+            try:
+                if context_image:
+                    output, error = self.model.run(prompt, context_image=context_image)
+                else:
+                    output, error = self.model.run(prompt)
+            except Exception:
+                # Si le modèle Bytez ne supporte pas les images
+                output, error = self.model.run(prompt)
+            
+            if error or not output.endswith(".mp4"):
+                raise Exception(error or "Vidéo invalide")
+            
+            return output , error
+        except Exception as e:
+            raise Exception(f"Bytez generation error: {e}")
+
+
+# === Runware Model ===
+class RunwareModel(BaseVideoModel):
+    """
+    Implémentation du modèle Runware.
+    Nécessite un client Runware initialisé.
+    """
+    def __init__(self, client, model_text="klingai:5@3", model_image="klingai:3@2"):
+        super().__init__("runware")
+        self.client = client
+        self.model_text = model_text
+        self.model_image = model_image
+
+    async def generate(self, prompt: str, context_image: bytes = None) -> str:
+        error= False
+        try:
+            if context_image:
+                # 🖼️ Tentative d'image-to-video
+                image_base64 = base64.b64encode(context_image).decode("utf-8")
+                frame_images = [
+                    {"inputImage": image_base64, "frame": "first"},
+                ]
+                request = {
+                    "taskType": "videoInference",
+                    "positivePrompt": f"L'image initiale de la video que tu va generer est l'image que j'ai donnée.{prompt}",
+                    "model": self.model_image,
+                    "duration": 10,
+                    "width": 1280,
+                    "height": 720,
+                    "frameImages": frame_images,
+                    "numberResults": 1
+                }
+            else:
+                # 📝 Text-to-video
+                request = {
+                    "taskType": "videoInference",
+                    "positivePrompt": prompt,
+                    "model": self.model_text,
+                    "duration": 10,
+                    "width": 1280,
+                    "height": 720,
+                    "numberResults": 1
+                }
+
+            response = await self.client.videoInference(requestVideo=request)
+            return response
+
+        except Exception as e:
+            # 🔁 Si le modèle refuse l’image, on repasse en texte pur
+            logger.warning(f"Runware image input failed, retrying as text-only: {e}")
+            request = {
+                "taskType": "videoInference",
+                "positivePrompt": prompt,
+                "model": self.model_text,
+                "duration": 10,
+                "width": 1280,
+                "height": 720,
+                "numberResults": 1
+            }
+            response = await self.client.videoInference(requestVideo=request)
+            return response
+
+bytez_model=BytezModel(Bytez(BYTEZ_API_KEY), BYTEZ_MODEL_ID)
+runware_client = Runware(api_key=os.getenv("RUNWARE_API_KEY"))
+
+# ---- Helpers ---
+# Fonction de génération de video generale
+# async def generate_video_general(
+#                                 prompt: str, 
+#                                 duration: int, 
+#                                 platform: Literal["tiktok", "youtube"],
+#                                 quality: str = "medium", 
+#                                 use_negative_prompt: bool = False) -> Dict:
+#     """
+#     Génère une vidéo en utilisant le service Bytez ou Runware.
+#     Utilise la découpe en scènes et l'assemblage final.
+#     """
+#     start_time = datetime.now()
+
+#     try:
+#         model = bytez_model
+#         # ⚙️ Préparation du prompt
+#         config = VIDEO_CONFIGS[platform]
+#         enhanced_prompt = enhance_prompt(prompt, platform)
+#         negative = get_negative_prompt(platform) if use_negative_prompt else None
+        
+#         logger.info(f"🎬 Génération vidéo Bytez: platform={platform}, prompt='{enhanced_prompt[:100]}...'")
+
+#         # 🧠 Découpe du prompt global en plusieurs sous-scènes
+#         print("Découpage du prompt en scènes...")
+#         scenes = split_prompt(enhanced_prompt, duration)
+#         logger.info(f"📽️ {len(scenes)} sous-scènes générées pour {duration}s")
+
+
+#         scene_paths = []
+#         last_frame_path = None  # On garde la dernière image générée
+
+#         # 🎥 Génération séquentielle des clips
+#         for i, scene_prompt in enumerate(scenes, start=1):
+#             logger.info(f"▶️ Scène {i}/{len(scenes)} : '{scene_prompt[:80]}...'")
+            
+#             try:
+#                 # Si on a une image précédente, on essaie de l'envoyer au modèle
+#                 if last_frame_path:
+#                     try:
+#                         # Ici on prépare l'image (tu peux adapter selon le SDK)
+#                         with open(last_frame_path, "rb") as f:
+#                             last_frame_bytes = f.read()
+                        
+#                         # Envoye texte + image (si supporté)
+#                         output, error = await model.generate(scene_prompt, context_image=last_frame_bytes)
+#                         os.remove(last_frame_path)
+#                     except Exception as e:
+#                         # Si le modèle ne supporte pas l'image, on continue juste avec le texte
+#                         logger.warning(f"⚠️ L'image n'a pas été utilisée pour la scène {i} : {e}")
+#                         output, error = await model.generate(scene_prompt)
+#                 else:
+#                     # Première scène, texte uniquement
+#                     output, error = await model.generate(scene_prompt)
+                
+#                 if error:
+#                     if i == 1:
+#                         raise Exception(f"Erreur modele : {error}")
+#                     else:
+#                         break  # Stoppe la génération mais conserve les scènes déjà faites
+
+#                 if not output or not output.endswith(".mp4"):
+#                     raise Exception(f"Le modele n'a pas renvoyé de vidéo valide (scène {i}): {output}")
+
+#                 filename = f"scene_{i}_{os.path.basename(output)}"
+#                 local_path = os.path.join(VIDEO_STATIC_DIR, filename)
+#                 await download_video(output, local_path)
+#                 scene_paths.append(local_path)
+
+#                 # On récupère la dernière image de la vidéo générée pour la scène suivante
+#                 try:
+#                     clip = VideoFileClip(local_path)
+#                     last_frame = clip.get_frame(clip.duration - 0.01)  # Dernière frame
+#                     last_frame_image = Image.fromarray(last_frame)
+#                     last_frame_path = os.path.join(IMAGE_STATIC_DIR, f"last_frame_{i}.png")
+#                     last_frame_image.save(last_frame_path)
+#                     clip.close()
+#                 except Exception as e:
+#                     logger.warning(f"⚠️ Impossible d'extraire la dernière frame pour la scène {i}: {e}")
+#                     last_frame_path = None
+
+#             except Exception as e:
+#                 logger.error(f"❌ Erreur lors de la génération de la scène {i}: {e}")
+#                 break
+
+#         if not scene_paths:
+#                 raise Exception("Aucune scène générée avec succès")
+            
+#         # Si une seule scène → on renomme simplement
+#         if len(scene_paths) == 1:
+#             final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+#             final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
+#             os.rename(scene_paths[0], final_path)
+#             logger.info(f"🎞️ Une seule scène générée, renommée en {final_filename}")
+
+#         # Sinon concaténer plusieurs clips
+#         else:
+#             clips = [VideoFileClip(path) for path in scene_paths]
+#             final_clip = concatenate_videoclips(clips)
+#             final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+#             final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
+#             final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
+
+#             for clip in clips:
+#                 clip.close()
+#             for path in scene_paths:
+#                 os.remove(path)
+
+#         file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
+#         generation_time = (datetime.now() - start_time).total_seconds()
+
+#         return {
+#             "success": True,
+#             "video_url_dev": None,
+#             "local_path": f"/{final_path}",
+#             "filename": final_filename,
+#             "file_size_mb": round(file_size_mb, 2),
+#             "video_url": f"{BASE_URL}videos/{final_filename}",
+#             "platform": platform,
+#             "prompt_original": prompt,
+#             "prompt_enhanced": enhanced_prompt,
+#             "generation_time": generation_time,
+#             "generated_at": datetime.now().isoformat(),
+#         }
+
+#     except Exception as e:
+#         logger.error(f"❌ Erreur génération vidéo: {e}")
+#         return {"success": False, "error": str(e)}
+    
+    
+    
+
+async def generate_video_general(
+    prompt: str,
+    duration: int,
+    platform: Literal["tiktok", "youtube"],
+    quality: str = "medium",
+    use_negative_prompt: bool = False,
+) -> Dict:
+    """
+    Génère une vidéo en plusieurs scènes, avec reprise sur erreur.
+    Supporte Bytez et garantit un résultat final même si certaines scènes échouent.
+    """
+    start_time = datetime.now()
+    model = bytez_model
+
+    try:
+        # ⚙️ Préparation du prompt
+        enhanced_prompt = enhance_prompt(prompt, platform)
+        negative = get_negative_prompt(platform) if use_negative_prompt else None
+        logger.info(f"🎬 Génération vidéo Bytez: platform={platform}, prompt='{enhanced_prompt[:100]}...'")
+
+        # 🧠 Découpage en sous-scènes
+        scenes = split_prompt(enhanced_prompt, duration)
+        logger.info(f"📽️ {len(scenes)} sous-scènes générées pour {duration}s")
+
+        scene_paths = []
+        last_frame_path = None
+
+        # Retry
+        MAX_RETRIES = 2  # Réessayer jusqu’à 2 fois si une scène échoue
+
+        for i, scene_prompt in enumerate(scenes, start=1):
+            logger.info(f"▶️ Scène {i}/{len(scenes)} : '{scene_prompt[:80]}...'")
+            retries = 0
+
+            while retries <= MAX_RETRIES:
+                try:
+                    # Si une image précédente existe, on la passe comme contexte
+                    if last_frame_path and os.path.exists(last_frame_path):
+                        with open(last_frame_path, "rb") as f:
+                            last_frame_bytes = f.read()
+                        output, error = await model.generate(scene_prompt, context_image=last_frame_bytes)
+                    else:
+                        output, error = await model.generate(scene_prompt)
+
+                    if error:
+                        raise Exception(f"Erreur modèle Bytez : {error}")
+
+                    # Vérifie que la sortie est bien une URL et un fichier .mp4
+                    if not output or not str(output).endswith(".mp4"):
+                        raise Exception(f"Sortie invalide : {output}")
+
+                    # Téléchargement et vérification du fichier local
+                    filename = f"scene_{i}_{os.path.basename(output)}"
+                    local_path = os.path.join(VIDEO_STATIC_DIR, filename)
+                    await download_video(output, local_path)
+
+                    if not os.path.exists(local_path) or os.path.getsize(local_path) < 50000:  # 50 Ko min
+                        raise Exception("Vidéo téléchargée invalide ou vide")
+
+                    scene_paths.append(local_path)
+                    logger.info(f"✅ Scène {i} enregistrée : {local_path}")
+
+                    # Extraire dernière frame
+                    try:
+                        clip = VideoFileClip(local_path)
+                        last_frame = clip.get_frame(clip.duration - 0.05)
+                        last_frame_image = Image.fromarray(last_frame)
+                        last_frame_path = os.path.join(IMAGE_STATIC_DIR, f"last_frame_{i}.png")
+                        last_frame_image.save(last_frame_path)
+                        clip.close()
+                    except Exception as e:
+                        logger.warning(f"⚠️ Impossible d'extraire la dernière frame pour la scène {i}: {e}")
+                        last_frame_path = None
+
+                    break  # ✅ Sort de la boucle retry si succès
+
+                except Exception as e:
+                    retries += 1
+                    logger.error(f"❌ Erreur lors de la scène {i} (tentative {retries}/{MAX_RETRIES}): {e}")
+                    if retries > MAX_RETRIES:
+                        logger.error(f"⛔ Scène {i} abandonnée après {MAX_RETRIES} tentatives")
+                        break
+                    await asyncio.sleep(2)  #  courte pause avant retry
+
+        # Nettoyage des images temporaires
+        if last_frame_path and os.path.exists(last_frame_path):
+            os.remove(last_frame_path)
+
+        if not scene_paths:
+            raise Exception("Aucune scène générée avec succès")
+
+        # 🧩 Fusion ou renommage final
+        if len(scene_paths) == 1:
+            final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
+            os.rename(scene_paths[0], final_path)
+            logger.info(f"🎞️ Une seule scène générée, renommée en {final_filename}")
+        else:
+            clips = []
+            for path in scene_paths:
+                try:
+                    clips.append(VideoFileClip(path))
+                except Exception as e:
+                    logger.warning(f"⚠️ Clip corrompu ignoré : {path} ({e})")
+
+            if not clips:
+                raise Exception("Aucune scène valide pour la fusion finale")
+
+            final_clip = concatenate_videoclips(clips)
+            final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
+            final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
+
+            for clip in clips:
+                clip.close()
+            for path in scene_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+
+        file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
+        generation_time = (datetime.now() - start_time).total_seconds()
+
+        return {
+            "success": True,
+            "video_url_dev": None,
+            "local_path": f"/{final_path}",
+            "filename": final_filename,
+            "file_size_mb": round(file_size_mb, 2),
+            "video_url": f"{BASE_URL}videos/{final_filename}",
+            "platform": platform,
+            "prompt_original": prompt,
+            "prompt_enhanced": enhanced_prompt,
+            "generation_time": generation_time,
+            "generated_at": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erreur génération vidéo: {e}")
+        return {"success": False, "error": str(e)}
+
 # Download video function
 async def download_video(url: str, dest_path: str):
     """Télécharge la vidéo de manière asynchrone."""
@@ -91,25 +485,6 @@ async def download_video(url: str, dest_path: str):
             async with aiofiles.open(dest_path, 'wb') as f:
                 await f.write(await resp.read())
     return dest_path    
-
-# Upload to IMGBB
-def upload_to_imgbb(file_path: str):
-    """
-    Upload un fichier (image ou vidéo) sur Imgbb et retourne la réponse JSON complète.
-    """
-    try:
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                "https://api.imgbb.com/1/upload",
-                params={"key": IMGBB_API_KEY},
-                files={"image": f}  # Imgbb attend le champ 'image'
-            )
-        
-        result = response.json()
-        return result
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 # Decoupe le prompt en 3 sous-prompts  
 # @router.post("/split-prompt")
@@ -172,126 +547,52 @@ def split_prompt(prompt: str, duration: int) -> list[str]:
         scenes.append("Scène vide")
 
     return scenes
+   
 
-# Génération avec Bytez
-async def generate_video_with_bytez(prompt: str, 
-                                    platform: str,
-                                    duration: int, 
-                                    quality: str = "medium", 
-                                    use_negative_prompt: bool = False) -> Dict:
-    start_time = datetime.now()
-
-    try:
-        # ⚙️ Préparation du prompt
-        config = VIDEO_CONFIGS[platform]
-        enhanced_prompt = enhance_prompt(prompt, platform)
-        negative = get_negative_prompt(platform) if use_negative_prompt else None
-        
-        logger.info(f"🎬 Génération vidéo Bytez: platform={platform}, prompt='{enhanced_prompt[:100]}...'")
-
-        # 🧠 Découpe du prompt global en plusieurs sous-scènes
-        scenes = split_prompt(enhanced_prompt, duration)
-        logger.info(f"📽️ {len(scenes)} sous-scènes générées pour {duration}s")
-
-        sdk = Bytez(BYTEZ_API_KEY)
-        model = sdk.model(BYTEZ_MODEL_ID)
-
-        scene_paths = []
-        # 🎥 Génération séquentielle des clips
-        for i, scene_prompt in enumerate(scenes, start=1):
-            logger.info(f"▶️ Scène {i}/{len(scenes)} : '{scene_prompt[:80]}...'")
-            output, error = model.run(scene_prompt)
-            if error:
-                if i==1:
-                    raise Exception(f"Erreur Bytez (scène {i}): {error}")
-                else:
-                    break  # Stoppe la génération mais conserve les scènes déjà faites
-
-            if not output or not output.endswith(".mp4"):
-                raise Exception(f"L'API Bytez n'a pas renvoyé de vidéo valide (scène {i}): {output}")
-
-            filename = f"scene_{i}_{os.path.basename(output)}"
-            local_path = os.path.join(VIDEO_STATIC_DIR, filename)
-            await download_video(output, local_path)
-            scene_paths.append(local_path)
-
-        # 🧩 Assemblage des clips avec MoviePy
-        clips = [VideoFileClip(path) for path in scene_paths]
-        final_clip = concatenate_videoclips(clips)
-        final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
-        final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
-
-        # 🧹 Nettoyage des clips individuels (optionnel)
-        for clip in clips:
-            clip.close()
-        for path in scene_paths:
-            os.remove(path)
-
-        # 📥 Upload final vers Imgbb
-        imgbb_result = upload_to_imgbb(final_path)
-        file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
-        generation_time = (datetime.now() - start_time).total_seconds()
-
-        if imgbb_result.get("success"):
-            logger.info(f"✅ Upload réussi : {imgbb_result['data']['url']}")
-        else:
-            logger.warning(f"⚠️ Erreur upload Imgbb : {imgbb_result.get('error')}")
-
-        return {
-            "success": True,
-            "video_url_dev": None,
-            "local_path": f"/{final_path}",
-            "filename": final_filename,
-            "file_size_mb": round(file_size_mb, 2),
-            "imgbb_success": imgbb_result.get("success", False),
-            "video_url": imgbb_result["data"]["url"] if imgbb_result.get("success") else None,
-            "imgbb_delete_url": imgbb_result["data"].get("delete_url") if imgbb_result.get("success") else None,
-            "imgbb_id": imgbb_result["data"].get("id") if imgbb_result.get("success") else None,
-            "platform": platform,
-            "prompt_original": prompt,
-            "prompt_enhanced": enhanced_prompt,
-            "generation_time": generation_time,
-            "generated_at": datetime.now().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Erreur génération vidéo: {e}")
-        return {"success": False, "error": str(e)}
-
-
-@router.post("/generate-video-bytez", response_model=VideoGenerationResponse)
+# ---- Routes FastAPI ---
+@router.post("/generate-video", response_model=VideoGenerationResponse)
 async def generate_video_only(
     platform: Literal["tiktok", "youtube"] = Form(...),
     theme_general: str = Form(...),
     theme_hebdo: str = Form(""),
     texte_inspiration: str = Form(""),
-    duration: int = Form(6),
+    duration: int = Form(2),
 ):
     try:
-        if BYTEZ_API_KEY is None:
-            logger.warning("BYTEZ_API_KEY non configuré (si le repo est gated, la génération échouera)")
+        
+        parts = []
 
-        parts = [theme_general.strip()]
+        # Inclure le platform en premier pour contextualiser le prompt
+        parts.append(f"Platform: {platform.capitalize()}")
+
+        # Thèmes et inspiration
+        if theme_general.strip():
+            parts.append(f"Theme general: {theme_general.strip()}")
         if theme_hebdo.strip():
-            parts.append(theme_hebdo.strip())
+            parts.append(f"Theme hebdo: {theme_hebdo.strip()}")
         if texte_inspiration.strip():
-            parts.append(texte_inspiration.strip()[:200])
-        video_prompt = " - ".join(parts)
+            # Limiter la longueur de l'inspiration pour éviter trop de texte
+            parts.append(f"Inspiration: {texte_inspiration.strip()[:200]}")
+
+        # Combiner en un seul prompt, séparé par " | "
+        video_prompt = " | ".join(parts)
 
         logger.info(f"🎥 Requête génération: platform={platform}, prompt={video_prompt[:140]}")
-        result = await generate_video_with_bytez(video_prompt, platform,duration=duration)
-
+        result = await generate_video_general(prompt=video_prompt, platform=platform,duration=duration)
+        # ✅ AJOUT : gestion du cas d'échec de génération
+        if not result.get("success", False):
+            logger.error(f"⚠️ Génération échouée : {result.get('error', 'Erreur inconnue')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erreur lors de la génération de la vidéo : {result.get('error', 'Erreur inconnue')}"
+            )
+        
         return VideoGenerationResponse(
             status="success",
             platform=platform,
             video_data={
                 "video_url": result["video_url"],
                 "local_path": result["local_path"],
-                "imgbb_success": result["imgbb_success"],
-                "imgbb_url": result["video_url"],
-                "imgbb_delete_url": result.get("imgbb_delete_url"),
-                "imgbb_id": result.get("imgbb_id"),
                 "generation_info": {
                     "platform": platform,
                     "theme_general": theme_general,
@@ -309,7 +610,7 @@ async def generate_video_only(
         logger.error(f"❌ Erreur génération vidéo: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de vidéo: {e}")
     
-@router.post("/generate-video-bytez-async", response_model=Dict)
+@router.post("/generate-video-async", response_model=Dict)
 async def generate_video_async(
     platform: Literal["tiktok", "youtube"] = Form(...),
     theme_general: str = Form(...),
@@ -318,7 +619,7 @@ async def generate_video_async(
     duration:int = Form(2)
 ):
     """
-        generate video ansync pour eviter timeout erreur
+        generate video async pour eviter timeout erreur
     """
     try:
         if BYTEZ_API_KEY is None:
@@ -338,18 +639,11 @@ async def generate_video_async(
         logger.error(f"❌ Erreur génération vidéo asynchrone: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de vidéo asynchrone: {e}")
     
-
 # Test endpoint
 @router.get("/health")
 async def health_check():
     start_time = datetime.now()
-    print(start_time)
-    # 🚀 Initialisation du SDK Bytez
-    sdk = Bytez(BYTEZ_API_KEY)
-    model = sdk.model("nachikethmurthy666/text-to-video-ms-1.7b")
-
-    # 🎥 Lancement de la génération
-    output, error = model.run("A Magician")
+    time.sleep(3)
     generation_time = (datetime.now() - start_time).total_seconds()
     print(generation_time)
-    return {"status": "ok", "timestamp": generation_time,"output":output, "error": error}
+    return {"status": "ok", "timestamp": generation_time}

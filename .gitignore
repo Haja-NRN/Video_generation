@@ -3,3 +3,4 @@
 __pycache__
 models
 static/
+!app/db/models
