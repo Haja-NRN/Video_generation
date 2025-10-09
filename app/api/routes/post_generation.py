@@ -205,136 +205,6 @@ runware_client = Runware(api_key=os.getenv("RUNWARE_API_KEY"))
 
 # ---- Helpers ---
 # Fonction de génération de video generale
-# async def generate_video_general(
-#                                 prompt: str, 
-#                                 duration: int, 
-#                                 platform: Literal["tiktok", "youtube"],
-#                                 quality: str = "medium", 
-#                                 use_negative_prompt: bool = False) -> Dict:
-#     """
-#     Génère une vidéo en utilisant le service Bytez ou Runware.
-#     Utilise la découpe en scènes et l'assemblage final.
-#     """
-#     start_time = datetime.now()
-
-#     try:
-#         model = bytez_model
-#         # ⚙️ Préparation du prompt
-#         config = VIDEO_CONFIGS[platform]
-#         enhanced_prompt = enhance_prompt(prompt, platform)
-#         negative = get_negative_prompt(platform) if use_negative_prompt else None
-        
-#         logger.info(f"🎬 Génération vidéo Bytez: platform={platform}, prompt='{enhanced_prompt[:100]}...'")
-
-#         # 🧠 Découpe du prompt global en plusieurs sous-scènes
-#         print("Découpage du prompt en scènes...")
-#         scenes = split_prompt(enhanced_prompt, duration)
-#         logger.info(f"📽️ {len(scenes)} sous-scènes générées pour {duration}s")
-
-
-#         scene_paths = []
-#         last_frame_path = None  # On garde la dernière image générée
-
-#         # 🎥 Génération séquentielle des clips
-#         for i, scene_prompt in enumerate(scenes, start=1):
-#             logger.info(f"▶️ Scène {i}/{len(scenes)} : '{scene_prompt[:80]}...'")
-            
-#             try:
-#                 # Si on a une image précédente, on essaie de l'envoyer au modèle
-#                 if last_frame_path:
-#                     try:
-#                         # Ici on prépare l'image (tu peux adapter selon le SDK)
-#                         with open(last_frame_path, "rb") as f:
-#                             last_frame_bytes = f.read()
-                        
-#                         # Envoye texte + image (si supporté)
-#                         output, error = await model.generate(scene_prompt, context_image=last_frame_bytes)
-#                         os.remove(last_frame_path)
-#                     except Exception as e:
-#                         # Si le modèle ne supporte pas l'image, on continue juste avec le texte
-#                         logger.warning(f"⚠️ L'image n'a pas été utilisée pour la scène {i} : {e}")
-#                         output, error = await model.generate(scene_prompt)
-#                 else:
-#                     # Première scène, texte uniquement
-#                     output, error = await model.generate(scene_prompt)
-                
-#                 if error:
-#                     if i == 1:
-#                         raise Exception(f"Erreur modele : {error}")
-#                     else:
-#                         break  # Stoppe la génération mais conserve les scènes déjà faites
-
-#                 if not output or not output.endswith(".mp4"):
-#                     raise Exception(f"Le modele n'a pas renvoyé de vidéo valide (scène {i}): {output}")
-
-#                 filename = f"scene_{i}_{os.path.basename(output)}"
-#                 local_path = os.path.join(VIDEO_STATIC_DIR, filename)
-#                 await download_video(output, local_path)
-#                 scene_paths.append(local_path)
-
-#                 # On récupère la dernière image de la vidéo générée pour la scène suivante
-#                 try:
-#                     clip = VideoFileClip(local_path)
-#                     last_frame = clip.get_frame(clip.duration - 0.01)  # Dernière frame
-#                     last_frame_image = Image.fromarray(last_frame)
-#                     last_frame_path = os.path.join(IMAGE_STATIC_DIR, f"last_frame_{i}.png")
-#                     last_frame_image.save(last_frame_path)
-#                     clip.close()
-#                 except Exception as e:
-#                     logger.warning(f"⚠️ Impossible d'extraire la dernière frame pour la scène {i}: {e}")
-#                     last_frame_path = None
-
-#             except Exception as e:
-#                 logger.error(f"❌ Erreur lors de la génération de la scène {i}: {e}")
-#                 break
-
-#         if not scene_paths:
-#                 raise Exception("Aucune scène générée avec succès")
-            
-#         # Si une seule scène → on renomme simplement
-#         if len(scene_paths) == 1:
-#             final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-#             final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
-#             os.rename(scene_paths[0], final_path)
-#             logger.info(f"🎞️ Une seule scène générée, renommée en {final_filename}")
-
-#         # Sinon concaténer plusieurs clips
-#         else:
-#             clips = [VideoFileClip(path) for path in scene_paths]
-#             final_clip = concatenate_videoclips(clips)
-#             final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-#             final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
-#             final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
-
-#             for clip in clips:
-#                 clip.close()
-#             for path in scene_paths:
-#                 os.remove(path)
-
-#         file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
-#         generation_time = (datetime.now() - start_time).total_seconds()
-
-#         return {
-#             "success": True,
-#             "video_url_dev": None,
-#             "local_path": f"/{final_path}",
-#             "filename": final_filename,
-#             "file_size_mb": round(file_size_mb, 2),
-#             "video_url": f"{BASE_URL}videos/{final_filename}",
-#             "platform": platform,
-#             "prompt_original": prompt,
-#             "prompt_enhanced": enhanced_prompt,
-#             "generation_time": generation_time,
-#             "generated_at": datetime.now().isoformat(),
-#         }
-
-#     except Exception as e:
-#         logger.error(f"❌ Erreur génération vidéo: {e}")
-#         return {"success": False, "error": str(e)}
-    
-    
-    
-
 async def generate_video_general(
     prompt: str,
     duration: int,
@@ -343,27 +213,28 @@ async def generate_video_general(
     use_negative_prompt: bool = False,
 ) -> Dict:
     """
-    Génère une vidéo en plusieurs scènes, avec reprise sur erreur.
-    Supporte Bytez et garantit un résultat final même si certaines scènes échouent.
+    Génère une vidéo en plusieurs scènes, avec reprise sur erreur et validations.
+    S'appuie sur un modèle conforme à BaseVideoModel (ici bytez_model).
+    Retourne {"success": True, ...} ou {"success": False, "error": "..."}.
     """
     start_time = datetime.now()
-    model = bytez_model
+    model: BaseVideoModel = bytez_model  # on garde Bytez par défaut
+
+    final_path = None
+    last_frame_path = None
+    clips: list[VideoFileClip] = []
+    scene_paths: list[str] = []
 
     try:
-        # ⚙️ Préparation du prompt
+        # Préparation du prompt
         enhanced_prompt = enhance_prompt(prompt, platform)
-        negative = get_negative_prompt(platform) if use_negative_prompt else None
         logger.info(f"🎬 Génération vidéo Bytez: platform={platform}, prompt='{enhanced_prompt[:100]}...'")
 
-        # 🧠 Découpage en sous-scènes
+        # Découpage en sous-scènes
         scenes = split_prompt(enhanced_prompt, duration)
         logger.info(f"📽️ {len(scenes)} sous-scènes générées pour {duration}s")
 
-        scene_paths = []
-        last_frame_path = None
-
-        # Retry
-        MAX_RETRIES = 2  # Réessayer jusqu’à 2 fois si une scène échoue
+        MAX_RETRIES = 2
 
         for i, scene_prompt in enumerate(scenes, start=1):
             logger.info(f"▶️ Scène {i}/{len(scenes)} : '{scene_prompt[:80]}...'")
@@ -371,88 +242,106 @@ async def generate_video_general(
 
             while retries <= MAX_RETRIES:
                 try:
-                    # Si une image précédente existe, on la passe comme contexte
+                    # Contexte image si dispo
                     if last_frame_path and os.path.exists(last_frame_path):
                         with open(last_frame_path, "rb") as f:
                             last_frame_bytes = f.read()
-                        output, error = await model.generate(scene_prompt, context_image=last_frame_bytes)
+                        output_url, gen_error = await model.generate(scene_prompt, context_image=last_frame_bytes)
                     else:
-                        output, error = await model.generate(scene_prompt)
+                        output_url, gen_error = await model.generate(scene_prompt)
 
-                    if error:
-                        raise Exception(f"Erreur modèle Bytez : {error}")
+                    if gen_error:
+                        raise Exception(gen_error)
+                    if not output_url or not str(output_url).lower().endswith(".mp4"):
+                        raise Exception(f"Sortie invalide (scène {i}): {output_url}")
 
-                    # Vérifie que la sortie est bien une URL et un fichier .mp4
-                    if not output or not str(output).endswith(".mp4"):
-                        raise Exception(f"Sortie invalide : {output}")
-
-                    # Téléchargement et vérification du fichier local
-                    filename = f"scene_{i}_{os.path.basename(output)}"
+                    filename = f"scene_{i}_{os.path.basename(output_url)}"
                     local_path = os.path.join(VIDEO_STATIC_DIR, filename)
-                    await download_video(output, local_path)
-
-                    if not os.path.exists(local_path) or os.path.getsize(local_path) < 50000:  # 50 Ko min
-                        raise Exception("Vidéo téléchargée invalide ou vide")
-
+                    await download_video(output_url, local_path)
                     scene_paths.append(local_path)
                     logger.info(f"✅ Scène {i} enregistrée : {local_path}")
 
-                    # Extraire dernière frame
+                    # Extraire dernière frame pour continuité visuelle
                     try:
                         clip = VideoFileClip(local_path)
-                        last_frame = clip.get_frame(clip.duration - 0.05)
+                        clips.append(clip)  # gardé ouvert jusqu’à la fusion
+                        last_frame = clip.get_frame(max(0, clip.duration - 0.05))
                         last_frame_image = Image.fromarray(last_frame)
+                        os.makedirs(IMAGE_STATIC_DIR, exist_ok=True)
                         last_frame_path = os.path.join(IMAGE_STATIC_DIR, f"last_frame_{i}.png")
                         last_frame_image.save(last_frame_path)
-                        clip.close()
                     except Exception as e:
                         logger.warning(f"⚠️ Impossible d'extraire la dernière frame pour la scène {i}: {e}")
                         last_frame_path = None
 
-                    break  # ✅ Sort de la boucle retry si succès
+                    break  # succès -> on sort de la boucle retry
 
                 except Exception as e:
                     retries += 1
-                    logger.error(f"❌ Erreur lors de la scène {i} (tentative {retries}/{MAX_RETRIES}): {e}")
+                    logger.error(f"❌ Erreur scène {i} (tentative {retries}/{MAX_RETRIES}): {e}")
                     if retries > MAX_RETRIES:
                         logger.error(f"⛔ Scène {i} abandonnée après {MAX_RETRIES} tentatives")
                         break
-                    await asyncio.sleep(2)  #  courte pause avant retry
+                    await asyncio.sleep(2)
 
-        # Nettoyage des images temporaires
+        # Nettoyage image temporaire
         if last_frame_path and os.path.exists(last_frame_path):
-            os.remove(last_frame_path)
+            try:
+                os.remove(last_frame_path)
+            except Exception:
+                pass
 
         if not scene_paths:
-            raise Exception("Aucune scène générée avec succès")
+            return {"success": False, "error": "Aucune scène générée avec succès"}
 
-        # 🧩 Fusion ou renommage final
+        # Fusion / renommage final
+        os.makedirs(VIDEO_STATIC_DIR, exist_ok=True)
+        final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
+
         if len(scene_paths) == 1:
-            final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
-            os.rename(scene_paths[0], final_path)
-            logger.info(f"🎞️ Une seule scène générée, renommée en {final_filename}")
+            # si un seul clip, fermer puis déplacer le fichier
+            try:
+                if clips:
+                    clips[0].close()
+                    clips = []
+                os.replace(scene_paths[0], final_path)
+            except Exception as e:
+                return {"success": False, "error": f"Échec renommage du clip unique: {e}"}
         else:
-            clips = []
-            for path in scene_paths:
+            # concat de tous les clips valides
+            usable_clips = []
+            for c in clips:
                 try:
-                    clips.append(VideoFileClip(path))
+                    _ = c.duration  # force chargement métadonnées
+                    usable_clips.append(c)
                 except Exception as e:
-                    logger.warning(f"⚠️ Clip corrompu ignoré : {path} ({e})")
+                    logger.warning(f"⚠️ Clip corrompu ignoré ({e})")
+            if not usable_clips:
+                return {"success": False, "error": "Aucune scène valide pour la fusion finale"}
 
-            if not clips:
-                raise Exception("Aucune scène valide pour la fusion finale")
+            try:
+                final_clip = concatenate_videoclips(usable_clips)
+                final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
+                final_clip.close()
+            except Exception as e:
+                return {"success": False, "error": f"Échec de la fusion finale: {e}"}
+            finally:
+                # fermer et supprimer les temporaires
+                for c in usable_clips:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                for path in scene_paths:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
 
-            final_clip = concatenate_videoclips(clips)
-            final_filename = f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            final_path = os.path.join(VIDEO_STATIC_DIR, final_filename)
-            final_clip.write_videofile(final_path, codec="libx264", audio=False, logger=None)
-
-            for clip in clips:
-                clip.close()
-            for path in scene_paths:
-                if os.path.exists(path):
-                    os.remove(path)
+        if not (final_path and os.path.exists(final_path)):
+            return {"success": False, "error": "Fichier final introuvable après génération"}
 
         file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
         generation_time = (datetime.now() - start_time).total_seconds()
@@ -472,8 +361,15 @@ async def generate_video_general(
         }
 
     except Exception as e:
-        logger.error(f"❌ Erreur génération vidéo: {e}")
+        logger.error(f"❌ Erreur génération vidéo (globale): {e}")
         return {"success": False, "error": str(e)}
+    finally:
+        # Fermeture/cleanup de sécurité si quelque chose est resté ouvert
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
 
 # Download video function
 async def download_video(url: str, dest_path: str):
